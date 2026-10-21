@@ -1,7 +1,59 @@
 ﻿$ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    $windowsModules = Join-Path $PSHOME 'Modules'
+    if ($windowsModules -notin @($env:PSModulePath -split ';')) { $env:PSModulePath = $windowsModules + ';' + $env:PSModulePath }
+}
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $DataRoot = Join-Path $ProjectRoot 'data'
-$PlatformUrl = 'http://127.0.0.1:3080'
+$PlatformPort = 3080
+$PreferredMode = 'Auto'
+$localConfigPath = Join-Path $ProjectRoot 'platform.local.json'
+if (Test-Path -LiteralPath $localConfigPath) {
+    $localConfig = Get-Content -LiteralPath $localConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($localConfig.port -isnot [int] -or $localConfig.port -lt 1024 -or $localConfig.port -gt 65535) { throw '本机启动配置中的端口必须为 1024 至 65535 的整数。' }
+    if ($localConfig.mode -notin @('Local','Docker')) { throw '本机启动配置中的模式必须为 Local 或 Docker。' }
+    if (-not ($localConfig.dataDirectory -is [string]) -or [string]::IsNullOrWhiteSpace($localConfig.dataDirectory)) { throw '本机启动配置缺少数据目录。' }
+    $DataRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $localConfig.dataDirectory))
+    if (-not $DataRoot.StartsWith($ProjectRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '本机数据目录必须位于项目文件夹内。' }
+    $PlatformPort = $localConfig.port
+    $PreferredMode = $localConfig.mode
+    if ($PreferredMode -eq 'Docker' -and ($PlatformPort -ne 3080 -or $DataRoot -ne (Join-Path $ProjectRoot 'data'))) { throw 'Docker 模式目前使用 3080 端口和 data 目录，请勿混用本地模式的数据位置。' }
+}
+$PlatformUrl = "http://127.0.0.1:$PlatformPort"
+
+function Get-PlatformCodeSignature {
+    $files = @(Get-Item -LiteralPath (Join-Path $ProjectRoot 'server.mjs')) + @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'lib') -Filter '*.mjs' -File)
+    $rows = foreach ($file in $files | Sort-Object FullName) { $file.FullName + ':' + (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash }
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($rows -join "`n")))).Replace('-','').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+}
+
+function Get-PlatformProcess {
+    $pidPath = Join-Path $DataRoot 'local-process.json'
+    if (-not (Test-Path -LiteralPath $pidPath)) { return $null }
+    $record = Get-Content -LiteralPath $pidPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $serverPath = Join-Path $ProjectRoot 'server.mjs'
+    if ($record.server -ne $serverPath) { throw '启动记录不属于当前项目，未操作任何进程。' }
+    $process = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$record.pid) -ErrorAction SilentlyContinue
+    if (-not $process) { return $null }
+    $nativeProcess = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    $recordedStart = if ($record.startedAt -is [DateTime]) { $record.startedAt.ToUniversalTime() } elseif ($record.startedAt -is [DateTimeOffset]) { $record.startedAt.UtcDateTime } else { [DateTimeOffset]::Parse($record.startedAt).UtcDateTime }
+    if (-not $nativeProcess -or [Math]::Abs(($nativeProcess.StartTime.ToUniversalTime() - $recordedStart).TotalSeconds) -gt 1) { return $null }
+    if (-not $process.CommandLine -or -not $process.CommandLine.Contains('"' + $serverPath + '"') -or [IO.Path]::GetFileName($process.ExecutablePath) -ne 'node.exe') { throw '启动记录与实际进程不一致，未操作任何进程。' }
+    return @{ record = $record; process = $nativeProcess }
+}
+
+function Get-PlatformListener {
+    return @(Get-NetTCPConnection -State Listen -LocalPort $PlatformPort -ErrorAction SilentlyContinue)
+}
+
+function Stop-PlatformProcess {
+    param($Tracked)
+    Stop-Process -Id $Tracked.process.Id -ErrorAction Stop
+    if (-not $Tracked.process.WaitForExit(10000)) { throw '本地服务尚未退出，请稍后重试。' }
+    Remove-Item -LiteralPath (Join-Path $DataRoot 'local-process.json') -ErrorAction SilentlyContinue
+}
 
 function Initialize-Platform {
     New-Item -ItemType Directory -Path $DataRoot,(Join-Path $DataRoot 'n8n'),(Join-Path $DataRoot 'logs'),(Join-Path $ProjectRoot 'backups') -Force | Out-Null

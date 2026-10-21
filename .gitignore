@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+platform.local.json
 serverchan.json
 serverchan.json.*
 ai-settings.json

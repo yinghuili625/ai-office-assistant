@@ -1,0 +1,5 @@
+{
+  "port": 3080,
+  "dataDirectory": "data",
+  "mode": "Local"
+}
