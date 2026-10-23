@@ -18,6 +18,7 @@ backups/
 
 # 依赖、编辑器及临时文件
 node_modules/
+.runtime/
 .idea/
 .vscode/
 *.log

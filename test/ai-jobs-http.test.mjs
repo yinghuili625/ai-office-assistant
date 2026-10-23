@@ -1,3 +1,4 @@
+import { currentModelConsent } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -32,7 +33,7 @@ async function fixture(t, options = {}) {
   const address = await app.start(), base = `http://127.0.0.1:${address.port}`;
   t.after(async () => { options.release?.(); await app.close(); await rm(dataDir, { recursive: true, force: true }); });
   const send = async (path, body, method = 'POST', headers = {}) => {
-    const result = await fetch(base + path, { method, headers: { Origin: base, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    const result = await fetch(base + path, { method, headers: { Origin: base, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(currentModelConsent(app.ai, body)) });
     return { status: result.status, ...await result.json() };
   };
   const get = async path => { const result = await fetch(base + path); return { status: result.status, ...await result.json() }; };

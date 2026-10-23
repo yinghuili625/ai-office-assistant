@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "description": "AI 辅助办公应用平台二期：本地任务管理与 AI 文档起草、人工审核",
-  "engines": { "node": ">=24.0.0" },
+  "engines": { "node": "^24.22.1 || ^26.12.1" },
   "scripts": {
     "start": "node server.mjs",
+    "pretest": "node lib/runtime.mjs",
     "test": "node --test"
   }
 }

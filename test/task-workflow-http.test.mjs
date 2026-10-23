@@ -1,3 +1,4 @@
+import { currentModelConsent } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -17,7 +18,7 @@ async function fixture(t) {
   } });
   const address = await app.start(), base = `http://127.0.0.1:${address.port}`;
   t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
-  const send = (path, body = {}, method = 'POST', headers = {}) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Origin: base, ...headers }, body: JSON.stringify(body) });
+  const send = (path, body = {}, method = 'POST', headers = {}) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Origin: base, ...headers }, body: JSON.stringify(currentModelConsent(app.ai, body)) });
   const get = async path => { const response = await fetch(base + path); assert.equal(response.status, 200, await response.clone().text()); return response.json(); };
   const { task } = await (await send('/api/tasks', { title: '三天内提交项目例会纪要', owner: '甲', startDate: '2026-10-20', dueDate: '2026-10-23', submissionType: '文本', deliverable: '整理会议决定、责任人与截止日期，提交Word纪要。' })).json();
   const path = `/api/tasks/${task.id}`;

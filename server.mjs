@@ -1,7 +1,8 @@
 import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { tmpdir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,6 +13,7 @@ import { AiService } from './lib/ai.mjs';
 import { AiJobs } from './lib/ai-jobs.mjs';
 import { TaskWorkflow } from './lib/task-workflow.mjs';
 import { createDocx, extractTextFile } from './lib/ai-files.mjs';
+import { assertSupportedNode } from './lib/runtime.mjs';
 
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const mimeTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.woff2': 'font/woff2' };
@@ -39,13 +41,16 @@ async function readJson(request, limit = 2 * 1024 * 1024) {
 }
 
 export function createApplication(options = {}) {
+  assertSupportedNode();
   const host = options.host ?? process.env.HOST ?? '127.0.0.1';
   const port = options.port ?? Number(process.env.PORT || 3080);
   const dataDir = resolve(options.dataDir ?? process.env.DATA_DIR ?? join(projectDir, 'data'));
   const scheduler = options.scheduler ?? process.env.SCHEDULER ?? 'internal';
   const automationKey = options.automationKey ?? process.env.AUTOMATION_KEY ?? '';
   const publicDir = resolve(options.publicDir ?? join(projectDir, 'public'));
-  const store = new OfficeStore({ databasePath: join(dataDir, 'office.sqlite'), seedDemo: options.seedDemo ?? process.env.SEED_DEMO !== '0', scheduler, ...(options.now ? { now: options.now } : {}) });
+  const instanceRoot = projectDir.replaceAll('\\', '/').replace(/\/$/, '');
+  const instanceId = options.instanceId ?? process.env.PLATFORM_INSTANCE_ID ?? createHash('sha256').update(`office-platform-v1:${process.platform === 'win32' ? instanceRoot.toLowerCase() : instanceRoot}`).digest('hex');
+  const store = new OfficeStore({ databasePath: join(dataDir, 'office.sqlite'), seedDemo: options.seedDemo ?? process.env.SEED_DEMO !== '0', scheduler, maxStoredBytes: options.maxStoredBytes ?? Number(process.env.MAX_STORED_BYTES || 4 * 1024 ** 3), ...(options.now ? { now: options.now } : {}) });
   const serverchan = new ServerChanService({ store, dataDir, sendKey: options.serverChanSendKey ?? process.env.SERVERCHAN_SENDKEY ?? '', ...(options.serverChanFetch ? { fetchImpl: options.serverChanFetch } : {}), ...(options.serverChanTimeoutMs ? { timeoutMs: options.serverChanTimeoutMs } : {}) });
   const ai = new AiService({ store, dataDir, ...(options.aiFetch ? { fetchImpl: options.aiFetch } : {}), ...(options.aiTimeoutMs ? { timeoutMs: options.aiTimeoutMs } : {}) });
   const jobs = new AiJobs(options.now ? { now: options.now } : {});
@@ -63,8 +68,11 @@ export function createApplication(options = {}) {
       if (!isAutomation && !localNames.has(url.hostname)) throw new InputError('请通过本机地址访问平台。', 403);
       if (pathname.startsWith('/api/')) {
         if (method === 'GET') {
-          if (pathname === '/api/health') return json(response, 200, { ok: true });
-          if (pathname === '/api/state') return json(response, 200, { ...store.state(), serverchan: serverchan.snapshot() });
+          if (pathname === '/api/health') return json(response, 200, { ok: true, instanceId, runtime: process.version });
+          if (pathname === '/api/state') return json(response, 200, { ...store.pageState(Object.fromEntries(url.searchParams)), serverchan: serverchan.snapshot() });
+          if (pathname === '/api/tasks/options') return json(response, 200, { tasks: store.taskOptions(url.searchParams.get('q') || '', url.searchParams.get('selected') || '') });
+          const taskDetails = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+          if (taskDetails) return json(response, 200, store.taskDetails(decodeURIComponent(taskDetails[1]), url.searchParams.get('eventPage') || '1'));
           if (pathname === '/api/serverchan') return json(response, 200, { serverchan: serverchan.snapshot() });
           if (pathname === '/api/ai') return json(response, 200, ai.state());
           const aiJobMatch = pathname.match(/^\/api\/ai\/jobs\/([^/]+)$/);
@@ -108,8 +116,9 @@ export function createApplication(options = {}) {
           if (pathname === '/api/backup') {
             const temporary = await mkdtemp(join(tmpdir(), 'office-backup-'));
             try {
-              const backupPath = join(temporary, 'office.sqlite'); store.createBackup(backupPath); const data = await readFile(backupPath);
-              response.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Disposition': `attachment; filename="office-backup.sqlite"; filename*=UTF-8''${encodeURIComponent('办公平台备份.sqlite')}`, 'Cache-Control': 'no-store' }); response.end(data);
+              const backupPath = join(temporary, 'office.sqlite'); store.createBackup(backupPath); const info = await stat(backupPath);
+              response.writeHead(200, { 'Content-Type': 'application/vnd.sqlite3', 'Content-Length': info.size, 'Content-Disposition': `attachment; filename="office-backup.sqlite"; filename*=UTF-8''${encodeURIComponent('办公平台备份.sqlite')}`, 'Cache-Control': 'no-store' });
+              await pipeline(createReadStream(backupPath), response);
             } finally { await rm(temporary, { recursive: true, force: true }); }
             return;
           }
@@ -127,6 +136,7 @@ export function createApplication(options = {}) {
         if (method === 'POST' && sourceUploadMatch) return json(response, 201, workflow.addSource(decodeURIComponent(sourceUploadMatch[1]), body));
         if (method === 'POST' && sourceExtractJobMatch) {
           if (body.consent !== true) throw new InputError('请先确认同意将该原件发送到当前配置的模型服务。');
+          ai.checkConsent(body);
           const taskId = decodeURIComponent(sourceExtractJobMatch[1]), sourceId = decodeURIComponent(sourceExtractJobMatch[2]);
           workflow.activeTask(taskId);
           if (workflow.source(taskId, sourceId).materialId) throw new InputError('该资料已有识别正文，请直接核对或编辑正文，不会覆盖已有内容。', 409);
@@ -144,6 +154,7 @@ export function createApplication(options = {}) {
         if (method === 'POST' && pathname === '/api/ai/transcribe') return json(response, 200, await ai.transcribe(body));
         if (method === 'POST' && pathname === '/api/ai/transcribe-jobs') {
           if (body.consent !== true) throw new InputError('请先确认同意将所选录音发送到当前配置的模型服务。');
+          ai.checkConsent(body);
           if (typeof body.file?.contentBase64 !== 'string' || !body.file.contentBase64) throw new InputError('请选择有效的录音文件。');
           const hash = createHash('sha256').update(body.file.contentBase64).digest('hex');
           const job = jobs.start({ key: `transcribe:${hash}`, run: onProgress => ai.transcribe(body, onProgress) });

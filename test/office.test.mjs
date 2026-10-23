@@ -223,7 +223,8 @@ test('HTTP 接口、同源防护、密钥校验、下载与静态文件边界', 
   const address = await app.start(); const base = `http://127.0.0.1:${address.port}`;
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const send = (path, body, { method = 'POST', headers = {} } = {}) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
-  assert.deepEqual(await (await fetch(base + '/api/health')).json(), { ok: true });
+  const health = await (await fetch(base + '/api/health')).json();
+  assert.equal(health.ok, true); assert.match(health.instanceId, /^[a-f0-9]{64}$/); assert.equal(health.runtime, process.version);
   assert.match(await (await fetch(base)).text(), /中文平台/);
   assert.equal((await fetch(base + '/%2e%2e%2fsecret.txt')).status, 404);
   assert.equal((await send('/api/tasks', taskInput(), { headers: { Origin: 'https://other.example' } })).status, 403);

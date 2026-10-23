@@ -5,28 +5,30 @@ import {modelService,runAiJob} from './ai-service-info.js';
 export function createAiOffice(ui) {
   const {api,esc,icon,action,option,heading,empty,timeText,openDrawer,closeDrawer,toast,getTasks,rerender}=ui;
   let state={settings:{enabled:false,baseUrl:'http://localhost:11434/v1',model:'',transcriptionModel:'',keyConfigured:false},templates:[],materials:[],documents:[],metrics:{reviewedCount:0,usableCount:0,usableRate:null}};
-  let loaded=false,loadError='',loading=null,busy=false,tab='documents',editor=null;
+  let loaded=false,loadError='',loading=null,busy=false,tab='documents',editor=null,displayedRevision='',taskChoices=[],taskSearchTimer=null,taskSearchToken=0;
   const urlId=id=>encodeURIComponent(id);
   const endpoint=()=>state.settings.baseUrl||'http://localhost:11434/v1';
   const service=()=>{try{return new URL(endpoint()).host;}catch{return endpoint();}};
-  const taskName=id=>getTasks().find(t=>t.id===id)?.title||'未关联任务';
+  const allTaskChoices=()=>[...new Map([...taskChoices,...getTasks(),...state.materials.filter(m=>m.taskId&&m.taskTitle).map(m=>({id:m.taskId,title:m.taskTitle})),...state.documents.filter(d=>d.taskId&&d.taskTitle).map(d=>({id:d.taskId,title:d.taskTitle}))].map(t=>[t.id,t])).values()];
+  const taskName=id=>allTaskChoices().find(t=>t.id===id)?.title||(id?'关联任务已删除':'未关联任务');
+  const taskOptions=(tasks,selected)=>option('',selected,'不关联任务')+tasks.map(t=>option(t.id,selected,`${t.number?`第 ${t.number} 号 · `:''}${t.title}`)).join('');
   const button=(name,label,cls='button',extra='')=>action(`ai-${name}`,label,cls,extra);
   const cancel=()=>action('close','关闭','button');
   const errorBox='<div class="form-error" role="alert"></div>';
   const textField=(label,name,value='',extra='')=>`<div class="field"><label for="ai-${name}">${label}</label><input id="ai-${name}" name="${name}" value="${esc(value)}" ${extra}></div>`;
   const textArea=(label,name,value='',extra='')=>`<div class="field"><label for="ai-${name}">${label}</label><textarea id="ai-${name}" name="${name}" ${extra}>${esc(value)}</textarea></div>`;
-  const taskSelect=(selected='')=>`<div class="field"><label for="ai-taskId">关联任务（选填）</label><select id="ai-taskId" name="taskId">${option('',selected,'不关联任务')}${getTasks().map(t=>option(t.id,selected,`第 ${t.number} 号 · ${t.title}`)).join('')}</select><span class="hint">仅用于本机索引，任务信息及交付文件不会自动发送给模型。</span></div>`;
+  const taskSelect=(selected='')=>`<div class="field"><label for="ai-task-search">搜索关联任务（选填）</label><input id="ai-task-search" placeholder="按任务名称或编号搜索" autocomplete="off"><select id="ai-taskId" name="taskId" aria-label="关联任务">${taskOptions(allTaskChoices(),selected)}</select><span class="hint">默认列出最近 100 项，搜索可查找更早任务。仅用于本机索引，任务信息及交付文件不会自动发送给模型。</span></div>`;
   const submit=(id,label,extra='')=>`<button type="submit" form="${id}" class="button primary" ${extra}>${label}</button>`;
-  const post=(path,body,method='POST')=>api(path,{method,body:JSON.stringify(body)});
+  const post=(path,body,method='POST')=>api(path,{method,body:JSON.stringify(body.consent===true?{...body,configRevision:body.configRevision??displayedRevision}:body)});
   const ready=()=>state.settings.enabled&&state.settings.model&&!state.settings.configError;
   const modelSettings=createModelSettings({esc,openDrawer,action,request,rerender,getSettings:()=>state.settings,saveSettings:async payload=>{
     const result=await post('/api/ai/settings',payload,'PATCH');state.settings=result.settings;return result;
-  },testConnection:(target='text')=>post('/api/ai/test',{consent:true,target})});
+  },testConnection:(target='text')=>post('/api/ai/test',{consent:true,target,configRevision:state.settings.configRevision})});
 
   async function load(render=true) {
     if(loading)return loading;
     loading=(async()=>{
-      try{state=await api('/api/ai');loaded=true;loadError='';return true;}
+      try{const [next,choices]=await Promise.all([api('/api/ai'),api('/api/tasks/options')]);state=next;taskChoices=choices.tasks;loaded=true;loadError='';return true;}
       catch(error){loadError=error.message;return false;}
       finally{loading=null;if(render)rerender();}
     })();
@@ -84,14 +86,17 @@ export function createAiOffice(ui) {
     modelSettings.open();
   }
   function testForm() {
+    displayedRevision=state.settings.configRevision;
     openDrawer('测试模型连接',`<form id="ai-test-form">${errorBox}<div class="ai-form-stack"><p class="ai-note">将向 <strong>${esc(endpoint())}</strong> 的 <strong>${esc(state.settings.model||'未配置')}</strong> 模型发送一段固定虚构文字，请确认后测试。</p><p class="subtitle">测试不读取任务、素材或文档。第三方服务可能按请求计费。</p><label class="ai-check"><input name="consent" type="checkbox" required><span>我同意向上述模型服务发送固定虚构测试文字</span></label></div></form>`,`${action('close','取消','button')}${submit('ai-test-form','确认测试连接')}`);
   }
   function materialForm(m={}) {
+    displayedRevision=state.settings.configRevision;
     const s=state.settings,audio=modelService(s,'transcription');
     editor=null;
     openDrawer(m.id?'编辑素材':'添加素材',`<form id="ai-material-form" data-id="${esc(m.id||'')}">${errorBox}<div class="ai-form-stack">${textField('资料名称','title',m.title,'required maxlength="200"')}<div class="form-grid"><div class="field"><label for="ai-kind">资料类型</label><select id="ai-kind" name="kind">${['素材','历史样例'].map(v=>option(v,m.kind||'素材')).join('')}</select><span class="hint">历史样例仅供格式参考，不应当作本次事实。</span></div>${taskSelect(m.taskId)}</div><div class="ai-import"><label for="ai-material-file">从文件导入正文</label><input id="ai-material-file" type="file" accept=".txt,.md,.csv,.docx"><p>支持文本、Markdown、表格文本和 Word，文件不超过 1 兆。仅在本机提取，选择文件后会替换下方正文。</p></div>${textArea('素材正文','content',m.content,'required maxlength="60000" rows="12" placeholder="粘贴会议记录、事实数据或历史样例正文"')}<details class="ai-audio"><summary>录音转写为素材（选用）</summary><div class="ai-form-stack"><p>转写服务：<strong>${esc(audio.baseUrl)}</strong><br>转写模型：${esc(audio.model||'尚未配置，请先在模型设置中填写')}</p><input id="ai-audio-file" type="file" accept=".mp3,.wav,.m4a,.webm,.mp4,.ogg,.flac" aria-label="选择录音文件"><p class="hint">千问支持最大 100 兆、最长 4 小时的录音，本机分成短段后逐段转写；其他兼容接口最大 20 兆。录音会发往上述服务，核对转写结果后保存素材。</p><label class="ai-check"><input id="ai-audio-consent" type="checkbox"><span>我同意将所选录音发送给上述服务进行转写</span></label>${button('transcribe','开始转写','button small',`${!s.transcriptionModel||!s.enabled?'disabled':''}`)}</div></details></div></form>`,`${action('close','取消','button')}${submit('ai-material-form','保存素材')}`);
   }
   function templateForm(t={}) {
+    displayedRevision=state.settings.configRevision;
     editor=null;
     openDrawer(t.id?'编辑文档模板':'新建文档模板',`<form id="ai-template-form" data-id="${esc(t.id||'')}">${errorBox}<div class="ai-form-stack"><details class="ai-template-assist"><summary>从历史文档识别（选用）</summary><div class="ai-form-stack"><p class="hint">提交一份历史文档，自动整理章节结构、下次写作需要补充的信息和写作要求。识别结果由你确认后再应用。</p><div class="ai-import"><label for="ai-template-file">选择历史文档</label><input id="ai-template-file" type="file" accept=".txt,.md,.csv,.docx"><p>支持 Word（.docx）、文本、Markdown 和表格文本，文件不超过 1 兆。仅在本机提取，选择文件后替换下方历史正文；也可直接粘贴。</p></div>${textField('历史文档名称（选填）','historyTitle','','maxlength="200" placeholder="例如：上月培训总结"')}${textArea('历史文档正文','historyContent','','maxlength="20000" rows="8" placeholder="导入文件或在这里粘贴正文，发送前请核对内容，最多 20000 字。"')}<div class="ai-note">发送至：<strong>${esc(endpoint())}</strong><br>使用模型：<strong>${esc(state.settings.model||'尚未配置')}</strong><br>仅发送此处的历史文档名称与正文，用于识别模板；不会自动保存历史文档。</div>${!ready()?'<p class="hint">请先关闭此窗口，在「模型设置」中配置并启用文档模型，再使用识别功能。也可直接填写下方模板。</p>':''}<label class="ai-check"><input id="ai-template-consent" type="checkbox"><span>我已核对历史正文，同意发送给上述模型服务识别结构与待补充内容</span></label><div>${button('template-analyze','识别结构与待补充内容','button small',!ready()?'disabled':'')}</div><section id="ai-template-suggestion" class="ai-template-suggestion" hidden><div class="ai-form-stack"><p class="ai-note">识别完成。请检查建议是否准确；点击「应用到模板」会替换下方模板名称与结构内容，仍需保存模板才会生效。</p>${textField('建议模板名称','suggestionName','','readonly')}${textArea('建议结构、待补充内容与写作要求','suggestionContent','','readonly rows="10"')}<div>${button('template-apply','应用到模板','button small primary')}</div></div></section></div></details>${textField('模板名称','name',t.name,'required maxlength="100" placeholder="例如：培训总结、工作汇报"')}${textArea('结构与写作要求','content',t.content,'required maxlength="20000" rows="15" placeholder="填写章节结构、语气与内容要求。不要在模板中写入本次未经核对的事实。"')}<p class="hint">本次生成使用的模板会随文档保存，后续修改模板不影响历史文档。</p></div></form>`,`${action('close','取消','button')}${submit('ai-template-form','保存模板')}`);
   }
@@ -128,8 +133,9 @@ export function createAiOffice(ui) {
     toast('已应用到下方模板，可继续编辑，核对后点击「保存模板」');
   }
   function generateForm(taskId='') {
+    displayedRevision=state.settings.configRevision;
     editor=null;
-    const task=getTasks().find(t=>t.id===taskId);
+    const task=allTaskChoices().find(t=>t.id===taskId);
     const materials=state.materials.filter(m=>m.kind==='素材'),references=state.materials.filter(m=>m.kind==='历史样例');
     const choices=(items,name)=>items.map(m=>`<label class="ai-choice"><input name="${name}" value="${esc(m.id)}" type="checkbox"><span><strong>${esc(m.title)}</strong><small>${esc(taskName(m.taskId))}</small></span></label>`).join('');
     openDrawer('AI 起草文档',`<form id="ai-generate-form">${errorBox}<div class="ai-form-stack">${!ready()?`<div class="ai-note">尚未启用可用的文档模型。请先关闭此窗口，在「模型设置」中保存配置。</div>`:''}${textField('文档名称','title',task?.title||'','required maxlength="200"')}${taskSelect(taskId)}<div class="field"><label for="ai-templateId">文档模板</label><select id="ai-templateId" name="templateId" required><option value="">请选择模板</option>${state.templates.map(t=>option(t.id,'',t.name)).join('')}</select></div><fieldset class="ai-fieldset"><legend>本次素材（至少 1 份，最多 5 份）</legend><div class="ai-choices">${materials.length?choices(materials,'materialIds'):'<p class="subtitle">尚无素材，请先在「素材与样例」中添加。</p>'}</div></fieldset><fieldset class="ai-fieldset"><legend>历史样例（选填，最多 3 份）</legend><p class="hint">仅参考结构和表达，不应把历史事实写入本次文档。</p><div class="ai-choices">${references.length?choices(references,'referenceIds'):'<p class="subtitle">暂无历史样例。</p>'}</div></fieldset><div class="ai-note">发送至：<strong>${esc(endpoint())}</strong><br>使用模型：<strong>${esc(state.settings.model||'尚未配置')}</strong><br>仅发送上述所选正文和模板；关联任务信息及交付文件不自动发送。AI 输出为待审核初稿。</div><label class="ai-check"><input name="consent" type="checkbox" required><span>我已核对所选资料，并同意发送给上述模型服务起草</span></label></div></form>`,`${action('close','取消','button')}${submit('ai-generate-form','确认发送并起草',!ready()?'disabled':'')}`);
@@ -254,7 +260,8 @@ export function createAiOffice(ui) {
       const file=input.files?.[0];if(!file)throw new Error('请先选择录音文件。');
       const max=modelService(state.settings,'transcription').provider==='qwen'?100:20;if(!file.size||file.size>max*1024*1024)throw new Error('录音文件必须非空，且不超过 '+max+' 兆。');
       if(!document.querySelector('#ai-audio-consent').checked)throw new Error('请先勾选同意将录音发送给模型服务。');
-      const result=await request(form,'正在转写，请稍候…',async()=>runAiJob(api,'/api/ai/transcribe-jobs',{file:{name:file.name,contentBase64:await readBase64(file)},consent:true},message=>{const el=form.querySelector('.ai-audio .hint');if(el)el.textContent=message;}));
+      const configRevision=displayedRevision;
+      const result=await request(form,'正在转写，请稍候…',async()=>runAiJob(api,'/api/ai/transcribe-jobs',{file:{name:file.name,contentBase64:await readBase64(file)},consent:true,configRevision},message=>{const el=form.querySelector('.ai-audio .hint');if(el)el.textContent=message;}));
       if(result){
         const old=form.elements.content.value.trim(),text=result.value.text||'';
         if((old.length+text.length+(old?2:0))>60000){
@@ -284,6 +291,11 @@ export function createAiOffice(ui) {
     }finally{el.disabled=false;}
   }
   return {load,render,onAction,onSubmit,get busy(){return busy;},input:target=>{
+    if(target?.id==='ai-task-search'){
+      const token=++taskSearchToken,selected=document.querySelector('#ai-taskId')?.value||'',q=target.value;
+      clearTimeout(taskSearchTimer);taskSearchTimer=setTimeout(async()=>{try{const result=await api('/api/tasks/options?'+new URLSearchParams({q,selected}));const select=document.querySelector('#ai-taskId');if(token===taskSearchToken&&select&&document.querySelector('#ai-task-search')===target)select.innerHTML=taskOptions(result.tasks,selected);}catch(error){if(token===taskSearchToken)showError(error);}},200);
+      return;
+    }
     updateEditorControls();
     if(target?.id==='ai-historyTitle'||target?.id==='ai-historyContent')clearTemplateSuggestion(target.closest('#ai-template-form'));
   },change:async target=>{if(target.id==='ai-material-file')await importMaterial(target);if(target.id==='ai-template-file')await importTemplateHistory(target);}};

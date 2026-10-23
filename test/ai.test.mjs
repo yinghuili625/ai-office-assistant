@@ -1,3 +1,4 @@
+import { approveCurrentModel } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -16,7 +17,7 @@ async function fixture(t, options = {}) {
   const store = new OfficeStore({ databasePath: join(dir, 'office.sqlite'), seedDemo: false });
   const requests = []; const services = [];
   const fetchImpl = options.fetchImpl || (async (url, request) => { requests.push({ url, ...request }); return chatResponse(); });
-  const service = (extra = {}) => { const client = new AiService({ store, dataDir: dir, fetchImpl, ...options, ...extra }); services.push(client); return client; };
+  const service = (extra = {}) => { const client = approveCurrentModel(new AiService({ store, dataDir: dir, fetchImpl, ...options, ...extra })); services.push(client); return client; };
   const client = service();
   t.after(async () => { for (const client of services) await client.close(); store.close(); await rm(dir, { force: true, recursive: true }); });
   const configure = () => client.updateSettings({ enabled: true, model: 'fake-chat', transcriptionModel: 'fake-audio', apiKey });
@@ -28,6 +29,7 @@ async function fixture(t, options = {}) {
 test('AI 默认关闭，配置独立原子保存、密钥不返回且不进入 SQLite 备份', async t => {
   const { dir, store, client, service, requests } = await fixture(t);
   assert.deepEqual(client.state().settings, {
+    configRevision: client.settings().configRevision,
     enabled: false, baseUrl: 'http://localhost:11434/v1', model: '', transcriptionModel: '', visionModel: '',
     transcriptionProvider: 'shared', transcriptionBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     visionProvider: 'shared', visionBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',

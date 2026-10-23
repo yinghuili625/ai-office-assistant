@@ -1,3 +1,4 @@
+import { approveCurrentModel } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -14,11 +15,11 @@ const draftText = '一、会议基本情况\n虚构会议记录。\n二、议定
 async function fixture(t, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'office-task-workflow-')); const calls = [];
   const store = new OfficeStore({ databasePath: join(dir, 'office.sqlite'), seedDemo: false, scheduler: 'external' });
-  const ai = new AiService({ store, dataDir: dir, fetchImpl: async (url, init) => {
+  const ai = approveCurrentModel(new AiService({ store, dataDir: dir, fetchImpl: async (url, init) => {
     calls.push({ url, init });
     if (options.fetchImpl) return options.fetchImpl(url, init);
     return new Response(JSON.stringify(url.endsWith('/audio/transcriptions') ? { text: '甲负责核对台账，会议日期待核实。' } : { choices: [{ message: { content: draftText } }] }));
-  } });
+  } }));
   const workflow = new TaskWorkflow({ store, ai });
   const task = store.createTask({ title: '例会纪要', owner: '虚构负责人', startDate: '2026-10-20', dueDate: '2026-10-23', deliverable: '包括会议情况、议定事项及责任分工', submissionType: '文本' });
   const configure = () => ai.updateSettings({ enabled: true, baseUrl: 'https://synthetic.invalid/v1', model: '虚构模型', transcriptionModel: '虚构转写', apiKey: 'synthetic-key-only' });

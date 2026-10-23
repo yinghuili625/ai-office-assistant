@@ -1,3 +1,4 @@
+import { approveCurrentModel } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rename, mkdir, rm } from 'node:fs/promises';
@@ -32,10 +33,10 @@ async function fixture(t, options = {}) {
   const store = new OfficeStore({ databasePath: join(dir, 'office.sqlite'), seedDemo: false });
   const calls = [], clients = [];
   const create = () => {
-    const client = new AiService({ ...options, store, dataDir: dir, fetchImpl: async (url, init) => {
+    const client = approveCurrentModel(new AiService({ ...options, store, dataDir: dir, fetchImpl: async (url, init) => {
       calls.push({ url, init });
       return options.fetchImpl ? options.fetchImpl(url, init) : url.endsWith('/audio/transcriptions') ? new Response(JSON.stringify({ text: '虚构录音转写。' })) : chat();
-    } });
+    } }));
     clients.push(client); return client;
   };
   const client = create();

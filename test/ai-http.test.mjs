@@ -1,3 +1,4 @@
+import { currentModelConsent } from '../test-support/consent.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -13,7 +14,7 @@ async function fixture(t, options = {}) {
   const app = createApplication({ host: '127.0.0.1', port: 0, dataDir: dir, seedDemo: false, scheduler: 'external', serverChanSendKey: '', aiFetch: async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify({ choices: [{ message: { content: draft } }] })); }, ...options });
   const address = await app.start(), base = `http://127.0.0.1:${address.port}`;
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const send = (path, body = {}, method = 'POST', headers = {}) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Origin: base, ...headers }, body: JSON.stringify(body) });
+  const send = (path, body = {}, method = 'POST', headers = {}) => fetch(base + path, { method, headers: { 'Content-Type': 'application/json', Origin: base, ...headers }, body: JSON.stringify(currentModelConsent(app.ai, body)) });
   const configure = () => send('/api/ai/settings', { enabled: true, baseUrl: 'https://model.example/v1', model: 'synthetic-model', transcriptionModel: '', apiKey: key }, 'PATCH');
   return { app, base, calls, send, configure };
 }

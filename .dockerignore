@@ -8,7 +8,9 @@ ai-settings.json
 ai-settings.json.*
 .git
 node_modules
+.runtime
 test
+test-support
 scripts
 workflows
 *.log

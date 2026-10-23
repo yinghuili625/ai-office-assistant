@@ -7,34 +7,40 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
   const area=(label,name,value='',extra='')=>`<div class="field"><label for="tw-${name}">${label}</label><textarea id="tw-${name}" name="${name}" ${extra}>${esc(value)}</textarea></div>`;
   const size=v=>v>=1048576?`${(v/1048576).toFixed(1)} 兆`:`${Math.max(1,Math.ceil(v/1024))} 千字节`;
   let id='',workspace=null,loading=false,error='',busy=false,progress='',loadToken=0,materialEditor=null;
-  let selected=new Set(),selectedDocument='',draftTitle='',templateId='',customTemplate=null,consent=false,confirmed=false;
+  let selected=new Set(),selectedDocument='',draftTitle='',templateId='',customTemplate=null,consent=false,consentRevision='',confirmed=false;
   let partialTranscription='',sourceMenuKey='',removeKey='',regeneratePrompt=false,reloadPrompt=false,conflict=false;
   const editors=new Map();
+  const taskDrafts=new Map();
+  let activeRun=null;
   const current=()=>editors.get(selectedDocument);
   const dirty=d=>!!d&&(d.title!==d.savedTitle||d.content!==d.savedContent);
   const ready=()=>workspace?.settings?.enabled&&workspace.settings.model&&!workspace.settings.configError;
-  const post=(path,body,method='POST')=>api(path,{method,body:JSON.stringify(body)});
+  function ensureContext(){if(activeRun&&(activeRun.token!==loadToken||activeRun.id!==id))throw new Error('任务已切换，已停止后续操作；原任务中已保存的资料仍保留。');}
+  const post=async(path,body,method='POST')=>{ensureContext();const result=await api(path,{method,body:JSON.stringify(body)});ensureContext();return result;};
   const template=()=>customTemplate||workspace?.templates.find(t=>t.id===templateId);
   function items(){
     const files=workspace?.sourceFiles||[],linked=new Set(files.map(f=>f.materialId).filter(Boolean));
     return [...files.map(f=>({key:`s:${f.id}`,name:f.name,source:f,materialId:f.materialId,kind:f.kind})),...(workspace?.materials||[]).filter(m=>!linked.has(m.id)).map(m=>({key:`m:${m.id}`,name:m.title,materialId:m.id,kind:'文字'}))];
   }
-  function resetConsent(){consent=false;const el=document.querySelector('[name="generateConsent"]');if(el)el.checked=false;}
+  function resetConsent(){consent=false;consentRevision='';const el=document.querySelector('[name="generateConsent"]');if(el)el.checked=false;}
   function resetConfirmed(){confirmed=false;const el=document.querySelector('[name="finishConfirmed"]');if(el)el.checked=false;}
   function renderBusy(){
     const root=document.querySelector('.task-workspace');if(!root)return;
     root.querySelectorAll('button,input,select,textarea').forEach(el=>el.disabled=true);
     let el=root.querySelector('.tw-progress');if(!el){root.insertAdjacentHTML('afterbegin','<p class="tw-progress" role="status"></p>');el=root.querySelector('.tw-progress');}el.textContent=progress||'正在处理，请稍候…';
   }
-  function status(message){progress=message;renderBusy();}
+  function status(message){ensureContext();progress=message;renderBusy();}
   async function run(work,success=''){
-    if(busy)return;busy=true;error='';progress='正在处理，请稍候…';renderBusy();
-    try{await work();if(success)toast(success);}
-    catch(e){error=e.message;if(e.partialText)partialTranscription=e.partialText;if(e.status===409&&current())conflict=true;toast(e.message,true);}
-    finally{busy=false;progress='';rerender();}
+    if(busy)return;busy=true;const context={token:loadToken,id};activeRun=context;error='';progress='正在处理，请稍候…';renderBusy();
+    try{await work();ensureContext();if(success)toast(success);}
+    catch(e){if(context.token===loadToken&&context.id===id){error=e.message;if(e.partialText)partialTranscription=e.partialText;if(e.status===409&&current())conflict=true;toast(e.message,true);}}
+    finally{busy=false;activeRun=null;progress='';rerender();}
   }
   async function reload(){
-    workspace=await api(`/api/tasks/${url(id)}/workspace`);
+    const taskId=id,token=loadToken;const result=await api(`/api/tasks/${url(taskId)}/workspace`);
+    if(taskId!==id||token!==loadToken){ensureContext();return null;}
+    ensureContext();
+    workspace=result;
     const keys=new Set(items().map(item=>item.key));selected=new Set([...selected].filter(key=>keys.has(key)));
     resetConsent();return workspace;
   }
@@ -50,6 +56,7 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
   async function open(taskId){
     if(id===taskId&&loading)return;
     if(id===taskId&&workspace){await run(reload);return;}
+    if(id)taskDrafts.set(id,{editors:new Map(editors),materialEditor,selected:new Set(selected),selectedDocument,draftTitle,templateId,customTemplate,partialTranscription});
     id=taskId;workspace=null;loading=true;error='';materialEditor=null;selected=new Set();selectedDocument='';editors.clear();
     partialTranscription='';draftTitle='';templateId='';customTemplate=null;consent=false;confirmed=false;sourceMenuKey='';removeKey='';regeneratePrompt=false;reloadPrompt=false;conflict=false;
     const token=++loadToken;rerender();
@@ -57,7 +64,14 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
       const result=await api(`/api/tasks/${url(taskId)}/workspace`);if(token!==loadToken)return;
       workspace=result;draftTitle=result.task.title;templateId=result.templates.find(t=>t.id==='builtin-minutes')?.id||result.templates[0]?.id||'';
       selected=new Set(items().slice(0,5).map(item=>item.key));
-      const latest=[...result.documents].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];if(latest)await openDocument(latest.id);
+      const cached=taskDrafts.get(taskId);
+      if(cached){
+        const live=new Set(result.documents.map(d=>d.id));for(const [key,value]of cached.editors)if(live.has(key)&&dirty(value))editors.set(key,value);
+        materialEditor=cached.materialEditor;selected=new Set([...cached.selected].filter(key=>items().some(item=>item.key===key)));draftTitle=cached.draftTitle;templateId=cached.templateId;customTemplate=cached.customTemplate;partialTranscription=cached.partialTranscription;
+      }
+      const latest=[...result.documents].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+      const documentId=cached?.selectedDocument&&result.documents.some(d=>d.id===cached.selectedDocument)?cached.selectedDocument:latest?.id;
+      if(documentId)await openDocument(documentId);
     }catch(e){if(token===loadToken)error=e.message;}
     finally{if(token===loadToken){loading=false;rerender();}}
   }
@@ -101,9 +115,11 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
   }
   async function generate(){
     if(!consent)throw new Error('请先勾选同意发送所选资料至上述模型服务。');
+    const approvedRevision=consentRevision;
     if(materialEditor?.dirty&&!materialEditor.id&&selected.size>=5)throw new Error('已选 5 份素材，请先取消一份，再将正在粘贴的文字一同用于生成。');
     const selectedBeforeSave=new Set(selected);
     if(materialEditor?.dirty){status('正在保存文字资料…');await saveMaterial();for(const key of selectedBeforeSave)selected.add(key);}
+    ensureContext();if(!approvedRevision||workspace.settings.configRevision!==approvedRevision)throw new Error('模型配置已变化，请重新核对服务地址并勾选同意后再生成。');
     const chosen=items().filter(item=>selected.has(item.key));
     if(!chosen.length||chosen.length>5)throw new Error('请选择 1 至 5 份素材。');
     const t=template();if(!t?.name?.trim()||!t?.content?.trim())throw new Error('请选择或上传有效模板。');
@@ -114,12 +130,12 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
     for(const item of chosen){
       if(item.materialId){materialIds.push(item.materialId);continue;}
       status(`正在识别：${item.name}`);
-      try{const r=await runAiJob(api,`/api/tasks/${url(id)}/sources/${url(item.source.id)}/extract-jobs`,{consent:true},message=>status(`${item.name}：${message}`));materialIds.push(r.material.id);partialTranscription='';}
+      try{const r=await runAiJob(api,`/api/tasks/${url(id)}/sources/${url(item.source.id)}/extract-jobs`,{consent:true,configRevision:approvedRevision},message=>{if(activeRun?.token===loadToken)status(`${item.name}：${message}`);});ensureContext();materialIds.push(r.material.id);partialTranscription='';}
       catch(e){await reload();const failure=new Error(`“${item.name}”识别失败：${e.message} 原件已保留，可取消勾选后重试。`);failure.partialText=e.partialText;throw failure;}
     }
     status('正在生成正文…');
-    const body={title,materialIds,referenceIds:[],consent:true,...(customTemplate?{template:{name:customTemplate.name,content:customTemplate.content}}:{templateId})};
-    let r;try{r=await post(`/api/tasks/${url(id)}/draft`,body);}catch(e){await reload();throw e;}await reload();await onTaskChange();await openDocument(r.document.id);regeneratePrompt=false;
+    const body={title,materialIds,referenceIds:[],consent:true,configRevision:approvedRevision,...(customTemplate?{template:{name:customTemplate.name,content:customTemplate.content}}:{templateId})};
+    let r;try{r=await post(`/api/tasks/${url(id)}/draft`,body);}catch(e){await reload();throw e;}await reload();await onTaskChange();ensureContext();await openDocument(r.document.id);regeneratePrompt=false;
   }
   async function onAction(name,el){
     if(busy)return;const target=el.dataset.id;
@@ -131,7 +147,7 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
     if(name==='material-new'){materialEditor={id:'',title:'会议记录',content:'',dirty:false};rerender();return;}
     if(name==='material-close'){if(materialEditor?.dirty)materialEditor.discardPrompt=true;else materialEditor=null;rerender();return;}
     if(name==='material-discard'){materialEditor=null;rerender();return;}
-    if(name==='material-open'){if(materialEditor?.dirty&&materialEditor.id!==target){error='当前文字资料尚未保存，请先保存或关闭编辑。';rerender();return;}await run(async()=>{if(materialEditor?.id===target)return;const r=await api(`/api/ai/materials/${url(target)}`);materialEditor={...r.material,dirty:false};});return;}
+    if(name==='material-open'){if(materialEditor?.dirty&&materialEditor.id!==target){error='当前文字资料尚未保存，请先保存或关闭编辑。';rerender();return;}await run(async()=>{if(materialEditor?.id===target)return;const r=await api(`/api/ai/materials/${url(target)}`);ensureContext();materialEditor={...r.material,dirty:false};});return;}
     if(name==='source-menu'){sourceMenuKey=sourceMenuKey===el.dataset.key?'':el.dataset.key;removeKey='';rerender();return;}
     if(name==='remove'){removeKey=el.dataset.key;sourceMenuKey='';rerender();return;}
     if(name==='remove-cancel'){removeKey='';rerender();return;}
@@ -191,9 +207,9 @@ export function createTaskWorkflow({api,esc,icon,action,option,timeText,badge,to
       if(target.checked)selected.add(target.value);else selected.delete(target.value);resetConsent();const count=document.querySelector('#tw-source-count');if(count)count.textContent=`已选 ${selected.size} / 5`;return;
     }
     if(name==='templateId'){if(target.value==='__custom')return;templateId=target.value;customTemplate=null;resetConsent();rerender();return;}
-    if(name==='generateConsent')consent=target.checked;
+    if(name==='generateConsent'){consent=target.checked;consentRevision=consent?workspace.settings.configRevision:'';}
     if(name==='finishConfirmed')confirmed=target.checked;
     if(name==='documentId'){await run(()=>openDocument(target.value));}
   }
-  return {open,render,onAction,onSubmit,input,change,reload:async()=>{if(!workspace||busy)return;await reload();rerender();},get busy(){return busy;},get taskId(){return id;},get hasUnsaved(){return [...editors.values()].some(dirty)||!!materialEditor?.dirty;}};
+  return {open,render,onAction,onSubmit,input,change,reload:async()=>{if(!workspace||busy)return;await reload();rerender();},get busy(){return busy;},get taskId(){return id;},get hasUnsaved(){return [...editors.values()].some(dirty)||!!materialEditor?.dirty||[...taskDrafts].some(([key,value])=>key!==id&&([...value.editors.values()].some(dirty)||value.materialEditor?.dirty));}};
 }

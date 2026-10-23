@@ -119,7 +119,7 @@ test('录音预处理失败或服务中断时不会调用模型供应商', { ski
   const client = new AiService({ store, dataDir: directory, fetchImpl: async (...args) => { calls.push(args); throw new Error('不应发送模型请求'); } });
   t.after(async () => { await client.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
   client.updateSettings({ enabled: true, baseUrl: 'https://document.example/v1', model: 'synthetic-document', transcriptionProvider: 'qwen', transcriptionBaseUrl: 'https://audio.example/compatible-mode/v1', transcriptionModel: 'qwen3-asr-flash', transcriptionApiKey: 'synthetic-audio-key' });
-  const submit = content => ({ file: { name: '虚构录音.wav', contentBase64: content.toString('base64') }, consent: true });
+  const submit = content => ({ configRevision: client.settings().configRevision, file: { name: '虚构录音.wav', contentBase64: content.toString('base64') }, consent: true });
   const before = directories();
   await assert.rejects(client.transcribe(submit(wav(14401, { sampleRate: 1000, bits: 8 }))), error => error.status === 400 && /4 小时/.test(error.message));
   const corruptCodec = wav(1); corruptCodec.writeUInt16LE(65535, 20);

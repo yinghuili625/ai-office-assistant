@@ -1,4 +1,4 @@
-FROM node:24.19.0-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=3080 HOST=0.0.0.0 DATA_DIR=/app/data TZ=Asia/Shanghai
 COPY server.mjs ./

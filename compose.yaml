@@ -1,4 +1,4 @@
-name: office-assistant-phase1
+name: ${PLATFORM_PROJECT_NAME:?请先运行启动脚本初始化当前项目标识}
 services:
   application:
     build: .
@@ -7,13 +7,15 @@ services:
       PORT: "3080"
       HOST: 0.0.0.0
       DATA_DIR: /app/data
+      PLATFORM_INSTANCE_ID: ${PLATFORM_INSTANCE_ID:?请先运行启动脚本初始化当前项目标识}
+      MAX_STORED_BYTES: ${MAX_STORED_BYTES:-4294967296}
       TZ: Asia/Shanghai
       SCHEDULER: external
       AUTOMATION_KEY: ${AUTOMATION_KEY:?请先运行启动脚本生成本地密钥}
       SEED_DEMO: ${SEED_DEMO:-1}
       SERVERCHAN_SENDKEY: ${SERVERCHAN_SENDKEY:-}
     ports:
-      - "127.0.0.1:3080:3080"
+      - "127.0.0.1:${PORT:-3080}:3080"
     volumes:
       - ./data:/app/data
     healthcheck:
@@ -35,8 +37,8 @@ services:
       N8N_HOST: localhost
       N8N_PORT: "5678"
       N8N_PROTOCOL: http
-      N8N_EDITOR_BASE_URL: http://localhost:5680
-      N8N_WEBHOOK_URL: http://localhost:5680/
+      N8N_EDITOR_BASE_URL: http://localhost:${N8N_EDITOR_PORT:-5680}
+      N8N_WEBHOOK_URL: http://localhost:${N8N_EDITOR_PORT:-5680}/
       N8N_SECURE_COOKIE: "false"
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?请先运行启动脚本生成本地密钥}
       AUTOMATION_KEY: ${AUTOMATION_KEY:?请先运行启动脚本生成本地密钥}
@@ -48,7 +50,7 @@ services:
       EXECUTIONS_DATA_MAX_AGE: "168"
       EXECUTIONS_DATA_PRUNE: "true"
     ports:
-      - "127.0.0.1:5680:5678"
+      - "127.0.0.1:${N8N_EDITOR_PORT:-5680}:5678"
     volumes:
       - ./data/n8n:/home/node/.n8n
       - ./scripts:/opt/office/scripts:ro
